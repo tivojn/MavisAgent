@@ -15,6 +15,13 @@ const closeSettings = document.getElementById('closeSettings');
 const saveSettingsBtn = document.getElementById('saveSettings');
 const mavisVideo = document.getElementById('mavisVideo');
 const avatarWrap = document.getElementById('avatarWrap');
+// AVSpeech avatar surface — image + SVG mouth overlay, hidden until that
+// engine is selected. Audio is held in a separate <audio> element so we can
+// drive Web Audio FFT off it without losing native playback controls.
+const avspeechPortrait = document.getElementById('avspeechPortrait');
+const mouthSvg = document.getElementById('mouthSvg');
+const mouthPath = document.getElementById('mouthPath');
+const avspeechAudio = document.getElementById('avspeechAudio');
 
 const apiKeyInput = document.getElementById('apiKey');
 const modelInput = document.getElementById('model');
@@ -22,6 +29,7 @@ const voiceSelect = document.getElementById('voice');
 const voiceLabel = document.getElementById('voiceLabel');
 const ttsEngineSelect = document.getElementById('ttsEngine');
 const sttEngineSelect = document.getElementById('sttEngine');
+const avatarEngineSelect = document.getElementById('avatarEngine');
 const resolutionSelect = document.getElementById('resolution');
 const fpsSelect = document.getElementById('fps');
 const systemPromptInput = document.getElementById('systemPrompt');
@@ -69,6 +77,20 @@ mavisVideo.addEventListener('error', () => {
   addError(`Video playback error (${code}): ${msg || 'could not load baked MP4'}`);
   goIdle();
 });
+if (avspeechAudio) {
+  avspeechAudio.addEventListener('ended', () => goIdle());
+  avspeechAudio.addEventListener('error', () => {
+    addError('AVSpeech audio failed to play.'); goIdle();
+  });
+}
+// Switch the avatar wrap into the right rendering mode so only the active
+// engine's DOM is visible. Keeps the avatar slot the exact same size whichever
+// engine is driving it.
+function setAvatarMode(mode /* 'video' | 'avspeech' */) {
+  if (!avatarWrap) return;
+  avatarWrap.classList.toggle('mode-video', mode === 'video');
+  avatarWrap.classList.toggle('mode-avspeech', mode === 'avspeech');
+}
 
 function setSpeaking(on) {
   avatarWrap.classList.toggle('speaking', !!on);
@@ -89,6 +111,13 @@ function goIdle() {
     mavisVideo.load();
     mavisVideo.poster = IDLE_POSTER;
   } catch {}
+  try {
+    if (avspeechAudio) { avspeechAudio.pause(); avspeechAudio.removeAttribute('src'); avspeechAudio.load(); }
+  } catch {}
+  stopAvSpeechAnim();
+  // Default visible surface when idle is the video poster — cheaper than the
+  // big portrait and consistent with the chat's existing visual rhythm.
+  setAvatarMode('video');
   refreshStatus();
 }
 
@@ -118,9 +147,11 @@ function streamText(div, fullText, durationSec) {
 }
 
 // Plays the baked MP4 AND reveals the reply text in sync with it.
+// Used by both 'unreal' and 'musetalk' avatar engines — they both produce MP4.
 // Text bubble is created at play() success — not before — so the user never
 // sees a transcript without a face.
 function playBaked(mp4Url, replyText) {
+  setAvatarMode('video');
   setDot('speaking');
   setSpeaking(true);
   statusEl.textContent = 'speaking\u2026';
@@ -150,11 +181,150 @@ function playBaked(mp4Url, replyText) {
   } catch (e) { console.warn(e); addMessage('mavis', replyText); goIdle(); }
 }
 
+// ---------- AVSpeech avatar (Mavis portrait + Web-Audio formant-driven mouth) ----------
+// Renders the canonical Mavis hero portrait, with a small SVG mouth-shape
+// laid over the lips. While the WAV plays, an AnalyserNode pulls per-frame
+// FFT bands and converts them into three viseme weights:
+//   jawOpen   <- F1 energy (300–900 Hz)  : open vowels (æ ɑ ʌ) push high
+//   lipSpread <- F2 energy (1000–2500 Hz): front vowels (i e) push wide
+//   teethHF   <- HF energy (3000–8000 Hz): sibilants (s sh f) flash teeth
+// These three weights drive an SVG <path> that morphs from closed lips to open
+// mouth in real time, so visemes are real (not amplitude-only) without any
+// alignment pass.
+let avAudioCtx = null;
+let avSourceNode = null;
+let avAnalyser = null;
+let avFreqBuf = null;
+let avAnimRaf = 0;
+let avLastEl = null;
+function stopAvSpeechAnim() {
+  if (avAnimRaf) { cancelAnimationFrame(avAnimRaf); avAnimRaf = 0; }
+  if (mouthPath) mouthPath.setAttribute('d', closedMouthPath());
+  if (mouthSvg) mouthSvg.style.opacity = '0';
+}
+// Mouth coords are in the SVG's own 100x60 viewBox, centered horizontally,
+// upper baseline at y=24. closedMouthPath() draws the resting lip seam; the
+// dynamic version expands it on jawOpen and stretches/contracts on lipSpread.
+function closedMouthPath() {
+  return 'M 18 30 Q 50 28 82 30 Q 50 32 18 30 Z';
+}
+function visemeMouthPath(jawOpen, lipSpread, teethHF) {
+  // Width swing: +18% on full spread, -10% on full round (we infer round when
+  // lipSpread is low AND jawOpen is non-trivial).
+  const round = Math.max(0, jawOpen * (1 - lipSpread));
+  const halfW = 32 + lipSpread * 12 - round * 9;            // 23..44 px
+  const cx = 50;
+  const topY = 30 - jawOpen * 7 + teethHF * 1.5;            // upper lip raises
+  const botY = 30 + jawOpen * 12 + round * 2;               // lower lip drops
+  const midSag = Math.min(jawOpen * 4, 4);                  // slight curve in the middle
+  const x1 = cx - halfW, x2 = cx + halfW;
+  // Two-cubic mouth: top curve, then bottom curve back. With teethHF > 0.3 we
+  // bisect with a thin highlight to suggest teeth.
+  let d = `M ${x1} 30 Q ${cx} ${topY - midSag} ${x2} 30 Q ${cx} ${botY + midSag} ${x1} 30 Z`;
+  if (teethHF > 0.32 && jawOpen > 0.18) {
+    const teethY = 30 - jawOpen * 1.2;
+    d += ` M ${cx - halfW * 0.7} ${teethY} L ${cx + halfW * 0.7} ${teethY}`;
+  }
+  return d;
+}
+function playAvSpeech(audioUrl, portraitUrl, replyText) {
+  setAvatarMode('avspeech');
+  setDot('speaking');
+  setSpeaking(true);
+  statusEl.textContent = 'speaking\u2026';
+  if (avspeechPortrait && portraitUrl && avspeechPortrait.src !== portraitUrl) {
+    avspeechPortrait.src = portraitUrl;
+  }
+  try {
+    avspeechAudio.muted = false;
+    const cacheBust = `${audioUrl}${audioUrl.includes('?') ? '&' : '?'}t=${Date.now()}`;
+    avspeechAudio.src = cacheBust;
+    avspeechAudio.load();
+    const onReady = () => {
+      avspeechAudio.removeEventListener('canplay', onReady);
+      // Web Audio plumbing — lazily create AudioContext (browser policy: needs
+      // a user gesture, which the send-button click counts as).
+      try {
+        if (!avAudioCtx) avAudioCtx = new (window.AudioContext || window.webkitAudioContext)();
+        if (avSourceNode && avLastEl === avspeechAudio) {
+          // Reuse the existing MediaElementSource so we don't hit the
+          // "HTMLMediaElement already connected" InvalidStateError.
+        } else {
+          avSourceNode = avAudioCtx.createMediaElementSource(avspeechAudio);
+          avAnalyser = avAudioCtx.createAnalyser();
+          avAnalyser.fftSize = 2048;            // ~23ms window at 48kHz — plenty for formant tracking
+          avAnalyser.smoothingTimeConstant = 0.5;
+          avSourceNode.connect(avAnalyser);
+          avAnalyser.connect(avAudioCtx.destination);
+          avFreqBuf = new Uint8Array(avAnalyser.frequencyBinCount);
+          avLastEl = avspeechAudio;
+        }
+        if (avAudioCtx.state === 'suspended') avAudioCtx.resume();
+      } catch (e) { console.warn('[mavis] web audio init failed', e); }
+
+      avspeechAudio.play().then(() => {
+        const div = addMessage('mavis', '');
+        const duration = (avspeechAudio.duration && isFinite(avspeechAudio.duration))
+          ? avspeechAudio.duration
+          : Math.max(2, replyText.length * 0.06);
+        streamText(div, replyText, duration * 0.88);
+        // Start the formant-driven mouth animation loop.
+        if (mouthSvg) mouthSvg.style.opacity = '1';
+        const sr = avAudioCtx ? avAudioCtx.sampleRate : 48000;
+        const binHz = sr / avAnalyser.fftSize;
+        // Pre-compute the FFT bin ranges for the three formant bands.
+        const idx = (hz) => Math.max(0, Math.min(avAnalyser.frequencyBinCount - 1, Math.round(hz / binHz)));
+        const f1Lo = idx(300),  f1Hi = idx(900);
+        const f2Lo = idx(1000), f2Hi = idx(2500);
+        const hfLo = idx(3000), hfHi = idx(8000);
+        const noiseFloor = 18; // u8 — below this we treat as silence (mouth closed)
+        let jOpen = 0, lSpread = 0, hfE = 0;
+        const tick = () => {
+          if (avspeechAudio.paused || avspeechAudio.ended) {
+            stopAvSpeechAnim();
+            return;
+          }
+          avAnalyser.getByteFrequencyData(avFreqBuf);
+          // Mean amplitude in each band.
+          let f1 = 0; for (let i = f1Lo; i <= f1Hi; i++) f1 += avFreqBuf[i]; f1 /= (f1Hi - f1Lo + 1);
+          let f2 = 0; for (let i = f2Lo; i <= f2Hi; i++) f2 += avFreqBuf[i]; f2 /= (f2Hi - f2Lo + 1);
+          let hf = 0; for (let i = hfLo; i <= hfHi; i++) hf += avFreqBuf[i]; hf /= (hfHi - hfLo + 1);
+          // Silence gate.
+          if (f1 < noiseFloor && f2 < noiseFloor && hf < noiseFloor) { f1 = f2 = hf = 0; }
+          // Normalize to 0..1 and gently saturate.
+          const j = Math.min(1, Math.max(0, (f1 - noiseFloor) / 110));
+          const s = Math.min(1, Math.max(0, (f2 - noiseFloor) / 120));
+          const h = Math.min(1, Math.max(0, (hf - noiseFloor) / 95));
+          // Easing so the mouth motion stays organic (not strobing every frame).
+          jOpen   += (j - jOpen)   * 0.45;
+          lSpread += (s - lSpread) * 0.40;
+          hfE     += (h - hfE)     * 0.55;
+          if (mouthPath) mouthPath.setAttribute('d', visemeMouthPath(jOpen, lSpread, hfE));
+          avAnimRaf = requestAnimationFrame(tick);
+        };
+        avAnimRaf = requestAnimationFrame(tick);
+      }).catch((e) => {
+        console.warn('[mavis] avspeech play() rejected', e);
+        addMessage('mavis', replyText);
+        addError(`Autoplay blocked: ${e.message || e}`);
+        goIdle();
+      });
+    };
+    avspeechAudio.addEventListener('canplay', onReady, { once: true });
+  } catch (e) { console.warn(e); addMessage('mavis', replyText); goIdle(); }
+}
+
 // ---------- Status ----------
 function shortLabel(s) {
-  if (s.ttsEngine === 'kokoro') return `${s.model} \u00b7 Kokoro`;
-  if (s.ttsEngine === 'xai') return `${s.model} \u00b7 xAI \u00b7 ${s.voice}`;
-  return `${s.model} \u00b7 ${s.voice.replace('en-US-', '').replace('Neural', '').replace('Multilingual', '')}`;
+  let voicePart;
+  if (s.ttsEngine === 'kokoro') voicePart = `Kokoro`;
+  else if (s.ttsEngine === 'xai') voicePart = `xAI \u00b7 ${s.voice}`;
+  else voicePart = s.voice.replace('en-US-', '').replace('Neural', '').replace('Multilingual', '');
+  // Tag the avatar engine when it's not the default UE bake.
+  const av = s.avatarEngine === 'avspeech' ? ' \u00b7 AVSpeech'
+          : s.avatarEngine === 'musetalk' ? ' \u00b7 MuseTalk'
+          : '';
+  return `${s.model} \u00b7 ${voicePart}${av}`;
 }
 async function refreshStatus() {
   const s = await window.mavis.getSettings();
@@ -218,14 +388,20 @@ async function send() {
 
     // Keep the same 'thinking' indicator during the bake — no second 'preparing her face' message.
     try {
-      const { mp4Path, mp4Url, cached } = await window.mavis.bakeReply(reply);
+      const baked = await window.mavis.bakeReply(reply);
       typing.remove();
-      if (cached) console.log('[mavis] cache hit', mp4Path);
-      const url = mp4Url || (mp4Path ? `file://${encodeURI(mp4Path)}` : null);
-      if (url) {
-        playBaked(url, reply);
+      if (baked?.cached) console.log('[mavis] cache hit', baked.mp4Path || baked.audioPath);
+      if (baked?.kind === 'avspeech') {
+        const audioUrl = baked.audioUrl || (baked.audioPath ? `file://${encodeURI(baked.audioPath)}` : null);
+        const portraitUrl = baked.portraitUrl || 'assets/portrait.jpg';
+        if (audioUrl) playAvSpeech(audioUrl, portraitUrl, reply);
+        else { addMessage('mavis', reply); goIdle(); }
+      } else if (baked?.kind === 'mp4') {
+        const url = baked.mp4Url || (baked.mp4Path ? `file://${encodeURI(baked.mp4Path)}` : null);
+        if (url) playBaked(url, reply);
+        else { addMessage('mavis', reply); goIdle(); }
       } else {
-        // No video (rare — empty reply). Show text so the user still gets the answer.
+        // No avatar payload (empty reply or 'none'). Still show the text.
         addMessage('mavis', reply);
         goIdle();
       }
@@ -284,6 +460,7 @@ async function openSettings() {
   populateResolutionList(opts.resolutions || [], s.resolution);
   fpsSelect.value = String(s.fps || 24);
   if (sttEngineSelect) sttEngineSelect.value = s.sttEngine || 'off';
+  if (avatarEngineSelect) avatarEngineSelect.value = s.avatarEngine || 'unreal';
   systemPromptInput.value = s.systemPrompt || '';
   settingsModal.classList.remove('hidden');
   refreshXaiAccount();
@@ -416,6 +593,7 @@ async function commitSettings() {
     voice: voiceSelect.value,
     ttsEngine: ttsEngineSelect.value,
     sttEngine: sttEngineSelect ? sttEngineSelect.value : 'off',
+    avatarEngine: avatarEngineSelect ? avatarEngineSelect.value : 'unreal',
     resolution: resolutionSelect.value,
     fps: Number(fpsSelect.value) || 24,
     systemPrompt: systemPromptInput.value.trim(),

@@ -1,21 +1,21 @@
 # Mavis Agent
 
-Electron AI agent companion. Mavis is the visual body — chat with an LLM, hear the reply, watch the **real MetaHuman face pronouncing each word** in ~4 seconds end-to-end.
+Electron AI agent companion. Mavis is the visual body — chat with an LLM, hear the reply, watch a **real lipsync face** speak it back in seconds.
 
-![status](https://img.shields.io/badge/version-0.6.0-d8b27a) ![runtime](https://img.shields.io/badge/runtime-Electron%20%2B%20Unreal%205.8-1c1a16) ![tts](https://img.shields.io/badge/TTS-Edge%20%7C%20Kokoro%20%7C%20xAI-2c5d3a) ![stt](https://img.shields.io/badge/STT-xAI-2c5d3a)
+![status](https://img.shields.io/badge/version-0.7.0-d8b27a) ![runtime](https://img.shields.io/badge/runtime-Electron%20%2B%20Unreal%205.8-1c1a16) ![tts](https://img.shields.io/badge/TTS-Edge%20%7C%20Kokoro%20%7C%20xAI-2c5d3a) ![stt](https://img.shields.io/badge/STT-xAI-2c5d3a) ![avatar](https://img.shields.io/badge/avatar-UE%20MetaHuman%20%7C%20AVSpeech%20%7C%20MuseTalk-d8b27a)
 
 ## What you get
 
-- A **circular MetaHuman face** sitting in a warm-dark stage, with a chat panel below.
-- Three TTS engines selectable from Settings:
-  - **Edge TTS** (cloud, multilingual) — default. ~4.0 s warm bake.
-  - **Kokoro 82M** (local, offline) — Apple Silicon MLX daemon. ~4.2 s warm bake.
-  - **xAI TTS** (cloud, expressive) — routed through Enconvo's OAuth2-managed xAI account. ~5.0 s warm bake.
-- **xAI Speech-to-Text** mic mode: enable in Settings → a mic button appears in the input bar → click to record, click again to send.
-- **xAI account chip** in Settings shows OAuth2 sign-in status straight from Enconvo's credential store.
-- Per-reply MP4 baked by Unreal Engine 5.8 MetaHuman Performance → Movie Render Queue → ffmpeg mux. Real phonemes, not audio-reactive jaw waggle.
-- Reply text streams character-by-character in sync with the baked audio.
-- Aggressive on-disk cache (≈ 100 ms hits) keyed by `(text, voice, resolution, fps, ttsEngine)`.
+- A **circular avatar stage** in a warm-dark setting, with a chat panel below.
+- **Three avatar engines** (Settings → Avatar engine):
+  - **Unreal MetaHuman** — default. Per-reply MP4 baked by UE 5.8 MetaHuman Performance → Movie Render Queue → ffmpeg. Real phonemes via RigLogic. ~4 s warm.
+  - **AVSpeech + portrait visemes** — native macOS `say` + the Mavis hero portrait + real-time Web Audio formant analysis (F1/F2/HF → jawOpen/lipSpread/teethHF). Real phoneme-aware visemes, zero dependencies, ~1 s warm. **No Unreal needed.**
+  - **MuseTalk** — local diffusion lipsync. Whisper audio features condition a latent diffusion U-Net that edits only the mouth region of the Mavis portrait. ~10–15 s warm on Apple Silicon (MPS). First run: `bash scripts/setup_musetalk.sh` (~3 GB).
+- **Three TTS engines** (Edge TTS / Kokoro 82M / xAI TTS) selectable from Settings.
+- **xAI STT mic mode** — click-to-record in the input bar, transcript auto-sends.
+- **xAI OAuth2 account chip** — sign-in status surfaced from Enconvo's credential store.
+- Reply text streams character-by-character synced to the audio for all three avatar engines.
+- On-disk cache keyed by `(text, voice, resolution, fps, ttsEngine, avatarEngine)`. Cache hits ≈ 100 ms.
 
 ## Architecture
 

@@ -106,6 +106,46 @@ body {
   display: block;
 }
 
+/* ========== AVSpeech avatar surface ==========
+   Layered inside the same .avatar-ring as the video; setAvatarMode() flips
+   the mode-video / mode-avspeech class on .avatar-wrap to swap which surface
+   is visible. The mouth SVG is absolutely positioned over the portrait's
+   lips (47% from left, 41% from top of the avatar circle, matching the
+   Mavis hero portrait's actual mouth location).                              */
+.avspeech-portrait {
+  position: absolute;
+  inset: 0;
+  width: 100%; height: 100%;
+  object-fit: cover;
+  /* Portrait is 1529×2048; lips sit at y≈41% so we shift focus up a bit. */
+  object-position: center 18%;
+  display: none;
+  background: #0a0805;
+}
+.mouth-svg {
+  position: absolute;
+  /* Mouth bbox in the portrait is centered at (47%, 41%) and ~9% wide,
+     ~2.5% tall in source coords. Object-fit: cover + 18% object-position
+     shifts the mouth to ~43% Y in the visible avatar. */
+  left: 50%;
+  top: 47%;
+  transform: translate(-50%, -50%);
+  width: 16%;
+  height: 10%;
+  display: none;
+  pointer-events: none;
+  opacity: 0;
+  /* Tiny drop-shadow to seat the mouth onto the face. */
+  filter: drop-shadow(0 1px 1.5px rgba(0,0,0,0.45));
+  transition: opacity 0.18s ease;
+}
+.avatar-wrap.mode-video .mavis-video       { display: block; }
+.avatar-wrap.mode-video .avspeech-portrait { display: none; }
+.avatar-wrap.mode-video .mouth-svg         { display: none; }
+.avatar-wrap.mode-avspeech .mavis-video       { display: none; }
+.avatar-wrap.mode-avspeech .avspeech-portrait { display: block; }
+.avatar-wrap.mode-avspeech .mouth-svg         { display: block; }
+
 /* ========== NAME + STATUS ========== */
 .name-block { text-align: center; }
 .mavis-name {

@@ -54,6 +54,12 @@ const DEFAULT_SETTINGS = {
   fps: 24,
   ttsEngine: 'edge', // 'edge' | 'kokoro' | 'xai'
   sttEngine: 'off',  // 'off' | 'xai' — mic input mode
+  // Avatar engine — which talking-head renderer drives the reply video.
+  //   'unreal'   — UE 5.8 MetaHuman MP4 (default, ~4s warm, requires UE running)
+  //   'avspeech' — macOS `say` + Web Audio formant analysis on the portrait
+  //                  (zero deps, ~0.5s, real F1/F2/HF-driven visemes)
+  //   'musetalk' — local diffusion lipsync on the portrait (~10-15s, MPS, ~3GB weights)
+  avatarEngine: 'unreal',
   systemPrompt:
     "You are Mavis \u2014 warm, present, sharp without being cold. You live inside a Mac and speak directly, without performing. Keep replies short (1\u20133 sentences) unless the user asks for depth. Have opinions. Use the user's name only if they tell you. Avoid emoji unless asked.",
 };
@@ -127,9 +133,13 @@ ipcMain.handle('chat:send', async (_e, { history, userMessage }) => {
 });
 
 // ---------- IPC: bake (real lipsync) ----------
-// Calls scripts/bake_reply.sh which: edge-tts -> wav -> UE bake -> MRQ render -> ffmpeg mux.
-// Cached by sha256(text + voice + 'v1'). Wall clock warm ~25-30s per fresh reply.
-const BAKE_SH = path.join(__dirname, 'scripts', 'bake_reply.sh');
+// Three engines feed the same {kind, ...} response shape so the renderer can
+// route to MP4 playback (unreal/musetalk) or to the AVSpeechAvatar component
+// (avspeech) without re-asking which engine baked.
+const BAKE_SH         = path.join(__dirname, 'scripts', 'bake_reply.sh');
+const BAKE_AVSPEECH   = path.join(__dirname, 'scripts', 'bake_avspeech.sh');
+const BAKE_MUSETALK   = path.join(__dirname, 'scripts', 'bake_musetalk.sh');
+const PORTRAIT_PATH   = path.join(__dirname, 'renderer', 'assets', 'portrait.jpg');
 // Cache version: bump when render settings change (resolution, AA, etc.) so
 // previously cached MP4s at the old format don't get served at the new format.
 // v1: 720x1080 TSR ta=4                                              — 27.0s
@@ -137,62 +147,103 @@ const BAKE_SH = path.join(__dirname, 'scripts', 'bake_reply.sh');
 // v3: 480x720 TSR ta=1 + skip redundant saves + 100ms poll            — 6.0s
 // v4: 432x648 + persistent UE daemon + ffmpeg veryfast                — 4.85s
 // v5: 24fps + reusable MHP + daemon prewarm + per-user picks + Kokoro — 4.0s
-const CACHE_VERSION = 'v5';
-function hashKey(text, voice, resKey, fps, ttsEngine) {
+// v6: avatarEngine in the key so AVSpeech/MuseTalk get their own slots         — varies
+const CACHE_VERSION = 'v6';
+function hashKey(text, voice, resKey, fps, ttsEngine, avatarEngine) {
   return crypto.createHash('sha256')
-    .update(`${CACHE_VERSION}\n${voice}\n${resKey}\n${fps}\n${ttsEngine}\n${text}`)
+    .update(`${CACHE_VERSION}\n${avatarEngine}\n${voice}\n${resKey}\n${fps}\n${ttsEngine}\n${text}`)
     .digest('hex').slice(0, 16);
 }
-function bakeReply(text) {
-  const voice = settings.voice;
-  const resKey = settings.resolution in RES_PRESETS ? settings.resolution : 'standard';
-  const res = RES_PRESETS[resKey];
-  const fps = Number(settings.fps) || 24;
-  const ttsEngine = ['kokoro', 'xai'].includes(settings.ttsEngine) ? settings.ttsEngine : 'edge';
+// Default helper: spawn a bake script, return whichever absolute path it printed.
+function runBakeScript(scriptPath, args, env) {
   return new Promise((resolve, reject) => {
-    const key = hashKey(text, voice, resKey, fps, ttsEngine);
-    const cachePath = path.join(cacheDir(), `${key}.mp4`);
-    if (fs.existsSync(cachePath)) {
-      resolve({ mp4Path: cachePath, mp4Url: pathToFileURL(cachePath).href, cached: true });
-      return;
-    }
-    const tmpOut = path.join(os.tmpdir(), 'mavis-bakes');
-    fs.mkdirSync(tmpOut, { recursive: true });
-    const env = {
-      ...process.env,
-      MAVIS_RES_W: String(res.w),
-      MAVIS_RES_H: String(res.h),
-      MAVIS_FPS: String(fps),
-      MAVIS_TTS: ttsEngine,
-    };
-    // For Kokoro the bake script reads KOKORO_VOICE; for xAI it reads XAI_VOICE
-    // (the $VOICE positional is reserved for the edge-tts voice id).
-    if (ttsEngine === 'kokoro') env.KOKORO_VOICE = voice;
-    if (ttsEngine === 'xai') {
-      env.XAI_VOICE = voice;
-      env.ENCONVO_API_URL = ENCONVO_API;
-    }
-    const child = spawn('bash', [BAKE_SH, text, voice, tmpOut], { env, stdio: ['ignore', 'pipe', 'pipe'] });
+    const child = spawn('bash', [scriptPath, ...args], { env, stdio: ['ignore', 'pipe', 'pipe'] });
     let stdout = '', stderr = '';
     child.stdout.on('data', (b) => (stdout += b.toString()));
     child.stderr.on('data', (b) => (stderr += b.toString()));
     child.on('error', (e) => reject(new Error(`bake spawn failed: ${e.message}`)));
     child.on('close', (code) => {
-      const mp4Out = stdout.trim().split('\n').pop();
-      if (code === 0 && mp4Out && fs.existsSync(mp4Out)) {
-        try {
-          fs.copyFileSync(mp4Out, cachePath);
-          fs.unlinkSync(mp4Out);
-        } catch {}
-        resolve({ mp4Path: cachePath, mp4Url: pathToFileURL(cachePath).href, cached: false });
-      } else {
-        reject(new Error(`bake failed (${code}): ${stderr.slice(0, 400) || stdout.slice(0, 400)}`));
-      }
+      const out = stdout.trim().split('\n').pop();
+      if (code === 0 && out && fs.existsSync(out)) resolve(out);
+      else reject(new Error(`bake failed (${code}): ${stderr.slice(0, 500) || stdout.slice(0, 500)}`));
     });
   });
 }
+async function bakeReply(text) {
+  const voice = settings.voice;
+  const resKey = settings.resolution in RES_PRESETS ? settings.resolution : 'standard';
+  const res = RES_PRESETS[resKey];
+  const fps = Number(settings.fps) || 24;
+  const ttsEngine = ['kokoro', 'xai'].includes(settings.ttsEngine) ? settings.ttsEngine : 'edge';
+  const avatarEngine = ['avspeech', 'musetalk'].includes(settings.avatarEngine) ? settings.avatarEngine : 'unreal';
+  const key = hashKey(text, voice, resKey, fps, ttsEngine, avatarEngine);
+  const tmpOut = path.join(os.tmpdir(), 'mavis-bakes');
+  fs.mkdirSync(tmpOut, { recursive: true });
+
+  // --- AVSpeech path: WAV + Mavis portrait + renderer-side formant animation
+  if (avatarEngine === 'avspeech') {
+    const cachePath = path.join(cacheDir(), `${key}.wav`);
+    if (fs.existsSync(cachePath)) {
+      return {
+        kind: 'avspeech', cached: true,
+        audioPath: cachePath, audioUrl: pathToFileURL(cachePath).href,
+        portraitUrl: pathToFileURL(PORTRAIT_PATH).href,
+      };
+    }
+    // Pick the macOS `say` voice. We respect a dedicated AVSpeech voice if set,
+    // otherwise fall back to Samantha — ships on every Mac.
+    const sayVoice = settings.avspeechVoice || 'Samantha';
+    const out = await runBakeScript(BAKE_AVSPEECH, [text, sayVoice, tmpOut], process.env);
+    fs.copyFileSync(out, cachePath);
+    try { fs.unlinkSync(out); } catch {}
+    return {
+      kind: 'avspeech', cached: false,
+      audioPath: cachePath, audioUrl: pathToFileURL(cachePath).href,
+      portraitUrl: pathToFileURL(PORTRAIT_PATH).href,
+    };
+  }
+
+  // --- MuseTalk path: MP4 with edited mouth region on the Mavis portrait
+  if (avatarEngine === 'musetalk') {
+    const cachePath = path.join(cacheDir(), `${key}.mp4`);
+    if (fs.existsSync(cachePath)) {
+      return { kind: 'mp4', engine: 'musetalk', cached: true, mp4Path: cachePath, mp4Url: pathToFileURL(cachePath).href };
+    }
+    const env = {
+      ...process.env,
+      MAVIS_TTS: ttsEngine,
+      MAVIS_FPS: '25',                                   // MuseTalk's native FPS
+      MAVIS_PORTRAIT: PORTRAIT_PATH,
+    };
+    if (ttsEngine === 'kokoro') env.KOKORO_VOICE = voice;
+    if (ttsEngine === 'xai') { env.XAI_VOICE = voice; env.ENCONVO_API_URL = ENCONVO_API; }
+    const out = await runBakeScript(BAKE_MUSETALK, [text, voice, tmpOut], env);
+    fs.copyFileSync(out, cachePath);
+    try { fs.unlinkSync(out); } catch {}
+    return { kind: 'mp4', engine: 'musetalk', cached: false, mp4Path: cachePath, mp4Url: pathToFileURL(cachePath).href };
+  }
+
+  // --- Default: UE MetaHuman bake (the v0.5/v0.6 production path)
+  const cachePath = path.join(cacheDir(), `${key}.mp4`);
+  if (fs.existsSync(cachePath)) {
+    return { kind: 'mp4', engine: 'unreal', cached: true, mp4Path: cachePath, mp4Url: pathToFileURL(cachePath).href };
+  }
+  const env = {
+    ...process.env,
+    MAVIS_RES_W: String(res.w),
+    MAVIS_RES_H: String(res.h),
+    MAVIS_FPS: String(fps),
+    MAVIS_TTS: ttsEngine,
+  };
+  if (ttsEngine === 'kokoro') env.KOKORO_VOICE = voice;
+  if (ttsEngine === 'xai') { env.XAI_VOICE = voice; env.ENCONVO_API_URL = ENCONVO_API; }
+  const out = await runBakeScript(BAKE_SH, [text, voice, tmpOut], env);
+  fs.copyFileSync(out, cachePath);
+  try { fs.unlinkSync(out); } catch {}
+  return { kind: 'mp4', engine: 'unreal', cached: false, mp4Path: cachePath, mp4Url: pathToFileURL(cachePath).href };
+}
 ipcMain.handle('bake:reply', async (_e, { text }) => {
-  if (!text?.trim()) return { mp4Path: null };
+  if (!text?.trim()) return { kind: 'none' };
   return bakeReply(text);
 });
 ipcMain.handle('settings:options', () => ({

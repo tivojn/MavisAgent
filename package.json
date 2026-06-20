@@ -1,6 +1,6 @@
 {
   "name": "mavis-agent",
-  "version": "0.6.0",
+  "version": "0.7.0",
   "description": "Mavis AI agent companion — GPT chat + Edge/Kokoro/xAI TTS + xAI STT + UE 5.8 MetaHuman face baked per-reply, in an Electron window.",
   "author": "Zane (Mavis)",
   "license": "MIT",
