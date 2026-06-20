@@ -1,0 +1,22 @@
+# Dependencies
+node_modules/
+
+# Baked MetaHuman MP4 cache (per-reply, regenerated on demand)
+cache/
+
+# Runtime logs
+*.log
+.DS_Store
+
+# OS / editor
+.vscode/
+.idea/
+*.swp
+
+# Local secrets / settings (lives in Electron userData, not the repo)
+settings.json
+.env
+.env.local
+
+# UE daemon runtime sockets (created at /tmp by the scripts)
+/tmp/mavis_*
