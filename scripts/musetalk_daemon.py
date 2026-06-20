@@ -48,6 +48,19 @@ if not sys.executable.startswith(str(VENV)):
 # Add MuseTalk repo to path so we can `from musetalk import ...`.
 sys.path.insert(0, str(REPO))
 
+# `load_all_model()` upstream uses *relative* weight paths ("models/musetalkV15/unet.pth",
+# "models/sd-vae/...", etc.) anchored at the process CWD. We chdir into the repo
+# root and ensure `<repo>/models` resolves to our WEIGHTS dir via a symlink, so
+# the upstream loader finds everything without code edits.
+os.chdir(str(REPO))
+_models_link = REPO / 'models'
+if not _models_link.exists() and not _models_link.is_symlink():
+    try:
+        WEIGHTS.mkdir(parents=True, exist_ok=True)
+        os.symlink(str(WEIGHTS), str(_models_link))
+    except OSError as _e:
+        print(f'[musetalk] WARN: could not link weights into repo: {_e}', file=sys.stderr)
+
 # Heavy imports — done once at daemon startup so /bake calls are fast.
 import torch
 import numpy as np
@@ -74,6 +87,21 @@ def _load_models():
         raise RuntimeError(f'MuseTalk modules not importable: {e}. Run scripts/setup_musetalk.sh.')
     # Some versions of MuseTalk hard-code weight paths; we point WEIGHTS via env.
     os.environ.setdefault('MUSETALK_WEIGHTS', str(WEIGHTS))
+    # Sanity-check that the upstream weights are present before invoking the
+    # loader — otherwise the user gets HF's confusing "not a valid model id"
+    # error instead of a clear "weights not downloaded" message.
+    _required = [
+        REPO / 'models' / 'musetalkV15' / 'unet.pth',
+        REPO / 'models' / 'sd-vae' / 'diffusion_pytorch_model.bin',
+        REPO / 'models' / 'whisper' / 'pytorch_model.bin',
+    ]
+    _missing = [str(p.relative_to(REPO)) for p in _required if not p.exists()]
+    if _missing:
+        raise RuntimeError(
+            'MuseTalk weights not installed. Missing: '
+            + ', '.join(_missing)
+            + '. Run: bash scripts/setup_musetalk.sh (re-downloads via upstream download_weights.sh, ~3 GB).'
+        )
     audio_processor, vae, unet, pe = load_all_model()
     if DEVICE == 'mps':
         vae = vae.to(DEVICE)

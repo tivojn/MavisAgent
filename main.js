@@ -2,7 +2,7 @@
 // Owns: window, persisted settings (API key + model + voice), OpenAI calls,
 // real-lipsync MP4 baking via Unreal MetaHuman Performance, and a sha256-keyed cache.
 
-const { app, BrowserWindow, ipcMain, shell } = require('electron');
+const { app, BrowserWindow, ipcMain, shell, dialog } = require('electron');
 const path = require('path');
 const fs = require('fs');
 const os = require('os');
@@ -60,6 +60,17 @@ const DEFAULT_SETTINGS = {
   //                  (zero deps, ~0.5s, real F1/F2/HF-driven visemes)
   //   'musetalk' — local diffusion lipsync on the portrait (~10-15s, MPS, ~3GB weights)
   avatarEngine: 'unreal',
+  // Avatar image — the still portrait used as the base for AVSpeech and MuseTalk.
+  // Default is the clean front-facing face capture; users can swap it via
+  // Settings → Avatar image → Change… which picks a file and persists the path.
+  // Empty string means "use the bundled default". Custom uploads are copied
+  // into app.getPath('userData')/avatars/ so they survive across app updates.
+  avatarImage: '',
+  // Mouth overlay position calibration (percent of the avatar circle, 0–100).
+  // Tuned for the default front-facing face capture; users with custom photos
+  // can tweak from Settings so the SVG mouth lines up with their portrait's lips.
+  avatarMouthX: 50,
+  avatarMouthY: 67,
   systemPrompt:
     "You are Mavis \u2014 warm, present, sharp without being cold. You live inside a Mac and speak directly, without performing. Keep replies short (1\u20133 sentences) unless the user asks for depth. Have opinions. Use the user's name only if they tell you. Avoid emoji unless asked.",
 };
@@ -106,7 +117,25 @@ app.on('window-all-closed', () => { if (process.platform !== 'darwin') app.quit(
 app.on('activate', () => { if (BrowserWindow.getAllWindows().length === 0) createWindow(); });
 
 // ---------- IPC: settings ----------
-ipcMain.handle('settings:get', () => ({ ...settings, hasKey: !!settings.apiKey }));
+// Resolve the active portrait path. Either user-picked absolute path, or the
+// bundled default at renderer/assets/portrait_face.png (the clean front-facing
+// capture). Returned to the renderer as a file:// URL so it works through
+// Electron's restricted file scheme.
+function resolvePortrait() {
+  const custom = settings.avatarImage && fs.existsSync(settings.avatarImage)
+    ? settings.avatarImage
+    : null;
+  return custom || path.join(__dirname, 'renderer', 'assets', 'portrait_face.png');
+}
+ipcMain.handle('settings:get', () => {
+  const p = resolvePortrait();
+  return {
+    ...settings,
+    hasKey: !!settings.apiKey,
+    avatarImageResolved: p,
+    avatarImageUrl: pathToFileURL(p).href,
+  };
+});
 ipcMain.handle('settings:set', (_e, patch) => {
   settings = { ...settings, ...patch };
   saveSettings(settings);
@@ -139,7 +168,8 @@ ipcMain.handle('chat:send', async (_e, { history, userMessage }) => {
 const BAKE_SH         = path.join(__dirname, 'scripts', 'bake_reply.sh');
 const BAKE_AVSPEECH   = path.join(__dirname, 'scripts', 'bake_avspeech.sh');
 const BAKE_MUSETALK   = path.join(__dirname, 'scripts', 'bake_musetalk.sh');
-const PORTRAIT_PATH   = path.join(__dirname, 'renderer', 'assets', 'portrait.jpg');
+// PORTRAIT_PATH is now dynamic — resolved at bake time via resolvePortrait()
+// so a user-swapped avatar image takes effect on the next reply with no restart.
 // Cache version: bump when render settings change (resolution, AA, etc.) so
 // previously cached MP4s at the old format don't get served at the new format.
 // v1: 720x1080 TSR ta=4                                              — 27.0s
@@ -180,14 +210,15 @@ async function bakeReply(text) {
   const tmpOut = path.join(os.tmpdir(), 'mavis-bakes');
   fs.mkdirSync(tmpOut, { recursive: true });
 
-  // --- AVSpeech path: WAV + Mavis portrait + renderer-side formant animation
+  // --- AVSpeech path: WAV + portrait + renderer-side formant animation
   if (avatarEngine === 'avspeech') {
+    const portraitPath = resolvePortrait();
     const cachePath = path.join(cacheDir(), `${key}.wav`);
     if (fs.existsSync(cachePath)) {
       return {
         kind: 'avspeech', cached: true,
         audioPath: cachePath, audioUrl: pathToFileURL(cachePath).href,
-        portraitUrl: pathToFileURL(PORTRAIT_PATH).href,
+        portraitUrl: pathToFileURL(portraitPath).href,
       };
     }
     // Pick the macOS `say` voice. We respect a dedicated AVSpeech voice if set,
@@ -199,7 +230,7 @@ async function bakeReply(text) {
     return {
       kind: 'avspeech', cached: false,
       audioPath: cachePath, audioUrl: pathToFileURL(cachePath).href,
-      portraitUrl: pathToFileURL(PORTRAIT_PATH).href,
+      portraitUrl: pathToFileURL(portraitPath).href,
     };
   }
 
@@ -213,7 +244,7 @@ async function bakeReply(text) {
       ...process.env,
       MAVIS_TTS: ttsEngine,
       MAVIS_FPS: '25',                                   // MuseTalk's native FPS
-      MAVIS_PORTRAIT: PORTRAIT_PATH,
+      MAVIS_PORTRAIT: resolvePortrait(),
     };
     if (ttsEngine === 'kokoro') env.KOKORO_VOICE = voice;
     if (ttsEngine === 'xai') { env.XAI_VOICE = voice; env.ENCONVO_API_URL = ENCONVO_API; }
@@ -295,6 +326,39 @@ ipcMain.handle('xai:sign_in', async () => {
     try { await shell.openExternal('https://x.ai/api'); } catch {}
     return { ok: false, error: String(e?.message || e) };
   }
+});
+
+// ---------- IPC: avatar image picker ----------
+// Open a native file picker, copy the chosen image into a managed avatars/
+// folder under userData, persist the absolute path in settings.avatarImage,
+// and return the new path + file:// URL so the renderer can hot-swap it.
+ipcMain.handle('avatar:pick', async () => {
+  const r = await dialog.showOpenDialog(win, {
+    title: 'Pick an avatar image',
+    properties: ['openFile'],
+    filters: [{ name: 'Images', extensions: ['png', 'jpg', 'jpeg', 'webp'] }],
+  });
+  if (r.canceled || !r.filePaths?.length) return { ok: false, canceled: true };
+  const src = r.filePaths[0];
+  const ext = (path.extname(src) || '.png').toLowerCase();
+  const dstDir = path.join(app.getPath('userData'), 'avatars');
+  fs.mkdirSync(dstDir, { recursive: true });
+  const dst = path.join(dstDir, `avatar-${Date.now()}${ext}`);
+  fs.copyFileSync(src, dst);
+  settings = { ...settings, avatarImage: dst };
+  saveSettings(settings);
+  return {
+    ok: true,
+    avatarImage: dst,
+    avatarImageUrl: pathToFileURL(dst).href,
+  };
+});
+// Wipe the user pick and fall back to the bundled default.
+ipcMain.handle('avatar:reset', () => {
+  settings = { ...settings, avatarImage: '' };
+  saveSettings(settings);
+  const p = resolvePortrait();
+  return { ok: true, avatarImage: '', avatarImageUrl: pathToFileURL(p).href };
 });
 
 // ---------- IPC: STT (xAI Speech-to-Text) ----------

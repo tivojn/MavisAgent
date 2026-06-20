@@ -13,4 +13,8 @@ contextBridge.exposeInMainWorld('mavis', {
   signInXai: () => ipcRenderer.invoke('xai:sign_in'),
   transcribe: (audio, mime, language) =>
     ipcRenderer.invoke('stt:transcribe', { audio, mime, language }),
+  // Avatar image picker — main process owns the native file dialog and the
+  // userData/avatars/ copy step; renderer just receives the new path + URL.
+  pickAvatar:  () => ipcRenderer.invoke('avatar:pick'),
+  resetAvatar: () => ipcRenderer.invoke('avatar:reset'),
 });

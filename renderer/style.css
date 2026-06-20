@@ -117,18 +117,21 @@ body {
   inset: 0;
   width: 100%; height: 100%;
   object-fit: cover;
-  /* Portrait is 1529×2048; lips sit at y≈41% so we shift focus up a bit. */
-  object-position: center 18%;
+  /* Default portrait is 1086×1448 (front-facing capture); face is centered
+     and lips sit at y≈60% of source. We crop so forehead-to-chin fills the
+     circle nicely. Custom uploads with different framing get a per-portrait
+     mouth-position tweak from Settings. */
+  object-position: center 30%;
   display: none;
   background: #0a0805;
 }
 .mouth-svg {
   position: absolute;
-  /* Mouth bbox in the portrait is centered at (47%, 41%) and ~9% wide,
-     ~2.5% tall in source coords. Object-fit: cover + 18% object-position
-     shifts the mouth to ~43% Y in the visible avatar. */
+  /* Default left/top are set inline by renderer.js applyMouthPosition() from
+     settings.avatarMouthX / .avatarMouthY — 50% / 67% works on the bundled
+     front-facing capture, and users can tune for custom portraits. */
   left: 50%;
-  top: 47%;
+  top: 67%;
   transform: translate(-50%, -50%);
   width: 16%;
   height: 10%;
@@ -138,6 +141,77 @@ body {
   /* Tiny drop-shadow to seat the mouth onto the face. */
   filter: drop-shadow(0 1px 1.5px rgba(0,0,0,0.45));
   transition: opacity 0.18s ease;
+}
+
+/* ========== AVATAR IMAGE picker (settings modal) ========== */
+.avatar-picker {
+  display: flex; align-items: center; gap: 14px;
+  padding: 12px;
+  background: #f4ecd9;
+  border: 1px solid rgba(28, 22, 14, 0.08);
+  border-radius: 12px;
+}
+.avatar-preview {
+  width: 64px; height: 64px;
+  border-radius: 50%;
+  object-fit: cover;
+  object-position: center 30%;
+  background: #0a0805;
+  border: 2px solid rgba(218, 175, 110, 0.35);
+  flex-shrink: 0;
+  box-shadow: 0 2px 6px rgba(28, 22, 14, 0.15);
+}
+.avatar-picker-meta { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 8px; }
+.avatar-path-label {
+  font-size: 11.5px;
+  color: #5e553f;
+  font-weight: 500;
+  word-break: break-all;
+  line-height: 1.35;
+}
+.avatar-picker-actions { display: flex; gap: 6px; }
+
+/* Slider row for the mouth-position calibration sliders. */
+.slider-row {
+  display: grid !important;
+  grid-template-columns: 1fr auto;
+  align-items: center;
+  gap: 6px 12px;
+  font-size: 11.5px;
+  color: #5e553f;
+  font-weight: 500;
+}
+.slider-row .slider-val {
+  font-variant-numeric: tabular-nums;
+  color: #8a7f64;
+  font-weight: 600;
+  font-size: 11px;
+}
+.slider-row input[type="range"] {
+  grid-column: 1 / -1;
+  width: 100%;
+  -webkit-appearance: none;
+  appearance: none;
+  background: transparent;
+  cursor: pointer;
+  padding: 0;
+  border: none;
+}
+.slider-row input[type="range"]::-webkit-slider-runnable-track {
+  height: 4px;
+  background: rgba(28, 22, 14, 0.15);
+  border-radius: 2px;
+}
+.slider-row input[type="range"]::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 16px; height: 16px;
+  margin-top: -6px;
+  border-radius: 50%;
+  background: #1c1a16;
+  border: 2px solid #f4ecd9;
+  box-shadow: 0 1px 3px rgba(28, 22, 14, 0.3);
+  cursor: pointer;
 }
 .avatar-wrap.mode-video .mavis-video       { display: block; }
 .avatar-wrap.mode-video .avspeech-portrait { display: none; }

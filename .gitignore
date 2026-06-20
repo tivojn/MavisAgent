@@ -20,3 +20,7 @@ settings.json
 
 # UE daemon runtime sockets (created at /tmp by the scripts)
 /tmp/mavis_*
+
+# MuseTalk vendor tree — huge (~3GB weights + Python venv + cloned repo).
+# Reproducible from scripts/setup_musetalk.sh on first run.
+vendor/musetalk/

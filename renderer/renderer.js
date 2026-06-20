@@ -36,6 +36,15 @@ const systemPromptInput = document.getElementById('systemPrompt');
 const xaiAccountState = document.getElementById('xaiAccountState');
 const xaiSignInBtn = document.getElementById('xaiSignInBtn');
 const micBtn = document.getElementById('micBtn');
+// Avatar image picker elements (preview thumb + pick/reset + mouth position sliders).
+const avatarPreview = document.getElementById('avatarPreview');
+const avatarPickBtn = document.getElementById('avatarPickBtn');
+const avatarResetBtn = document.getElementById('avatarResetBtn');
+const avatarPathLabel = document.getElementById('avatarPathLabel');
+const mouthXInput = document.getElementById('mouthX');
+const mouthYInput = document.getElementById('mouthY');
+const mouthXVal = document.getElementById('mouthXVal');
+const mouthYVal = document.getElementById('mouthYVal');
 
 const history = [];
 const HISTORY_LIMIT = 20;
@@ -202,6 +211,25 @@ function stopAvSpeechAnim() {
   if (mouthPath) mouthPath.setAttribute('d', closedMouthPath());
   if (mouthSvg) mouthSvg.style.opacity = '0';
 }
+// Apply the user-tuned mouth position to the SVG overlay. Called whenever
+// settings are loaded or the user drags the X/Y sliders — keeps the mouth
+// SVG sitting on top of the actual lips in whatever portrait is loaded.
+function applyMouthPosition(xPct, yPct) {
+  if (!mouthSvg) return;
+  const x = Math.max(0, Math.min(100, Number(xPct) || 50));
+  const y = Math.max(0, Math.min(100, Number(yPct) || 67));
+  mouthSvg.style.left = `${x}%`;
+  mouthSvg.style.top  = `${y}%`;
+}
+// Swap the portrait <img> source. Lazy-loaded on first AVSpeech reply or when
+// the user picks a new avatar.
+function applyAvatarImage(url) {
+  if (!url || !avspeechPortrait) return;
+  // Cache-bust so the file:// URL re-fetches after a user picks a new image
+  // with the same filename (rare, but cheap insurance).
+  const cacheBust = `${url}${url.includes('?') ? '&' : '?'}v=${Date.now()}`;
+  avspeechPortrait.src = cacheBust;
+}
 // Mouth coords are in the SVG's own 100x60 viewBox, centered horizontally,
 // upper baseline at y=24. closedMouthPath() draws the resting lip seam; the
 // dynamic version expands it on jawOpen and stretches/contracts on lipSpread.
@@ -232,8 +260,11 @@ function playAvSpeech(audioUrl, portraitUrl, replyText) {
   setDot('speaking');
   setSpeaking(true);
   statusEl.textContent = 'speaking\u2026';
-  if (avspeechPortrait && portraitUrl && avspeechPortrait.src !== portraitUrl) {
-    avspeechPortrait.src = portraitUrl;
+  // Hot-swap portrait if the bake returned a different URL than what's loaded.
+  if (avspeechPortrait && portraitUrl) {
+    // Strip cache-bust query when comparing so we don't reload on every reply.
+    const cur = (avspeechPortrait.src || '').split('?')[0];
+    if (cur !== portraitUrl) applyAvatarImage(portraitUrl);
   }
   try {
     avspeechAudio.muted = false;
@@ -335,6 +366,10 @@ async function refreshStatus() {
     statusEl.textContent = 'no API key';
     dotEl.classList.remove('live', 'speaking', 'thinking');
   }
+  // Keep the avatar surface in sync with persisted settings on every status
+  // refresh — covers the boot path and post-save UI consistency.
+  if (s.avatarImageUrl) applyAvatarImage(s.avatarImageUrl);
+  applyMouthPosition(s.avatarMouthX, s.avatarMouthY);
   return s;
 }
 
@@ -461,10 +496,66 @@ async function openSettings() {
   fpsSelect.value = String(s.fps || 24);
   if (sttEngineSelect) sttEngineSelect.value = s.sttEngine || 'off';
   if (avatarEngineSelect) avatarEngineSelect.value = s.avatarEngine || 'unreal';
+  // Avatar image — thumbnail, path label, mouth-position sliders.
+  if (avatarPreview && s.avatarImageUrl) avatarPreview.src = s.avatarImageUrl;
+  if (avatarPathLabel) {
+    avatarPathLabel.textContent = s.avatarImage
+      ? s.avatarImage.replace(/^.*\//, '')
+      : 'Default (bundled face capture)';
+  }
+  if (mouthXInput) { mouthXInput.value = String(s.avatarMouthX ?? 50); if (mouthXVal) mouthXVal.textContent = mouthXInput.value + '%'; }
+  if (mouthYInput) { mouthYInput.value = String(s.avatarMouthY ?? 67); if (mouthYVal) mouthYVal.textContent = mouthYInput.value + '%'; }
   systemPromptInput.value = s.systemPrompt || '';
   settingsModal.classList.remove('hidden');
   refreshXaiAccount();
   setTimeout(() => apiKeyInput.focus(), 50);
+}
+// Mouth-position sliders — update both the live SVG and the displayed % value
+// as the user drags. We persist the values on Save, not on every input event,
+// so cancelling the modal still leaves the persisted settings intact.
+if (mouthXInput) {
+  mouthXInput.addEventListener('input', () => {
+    if (mouthXVal) mouthXVal.textContent = mouthXInput.value + '%';
+    setAvatarMode('avspeech');                            // make the SVG visible so the user can see the move
+    if (mouthSvg) mouthSvg.style.opacity = '1';
+    applyMouthPosition(mouthXInput.value, mouthYInput ? mouthYInput.value : 67);
+  });
+}
+if (mouthYInput) {
+  mouthYInput.addEventListener('input', () => {
+    if (mouthYVal) mouthYVal.textContent = mouthYInput.value + '%';
+    setAvatarMode('avspeech');
+    if (mouthSvg) mouthSvg.style.opacity = '1';
+    applyMouthPosition(mouthXInput ? mouthXInput.value : 50, mouthYInput.value);
+  });
+}
+// Avatar pick / reset — wired to the native file dialog in main.js.
+if (avatarPickBtn) {
+  avatarPickBtn.addEventListener('click', async () => {
+    avatarPickBtn.disabled = true;
+    avatarPickBtn.textContent = 'Picking\u2026';
+    try {
+      const r = await window.mavis.pickAvatar();
+      if (r.ok) {
+        if (avatarPreview) avatarPreview.src = r.avatarImageUrl;
+        applyAvatarImage(r.avatarImageUrl);
+        if (avatarPathLabel) avatarPathLabel.textContent = (r.avatarImage || '').replace(/^.*\//, '');
+      }
+    } finally {
+      avatarPickBtn.disabled = false;
+      avatarPickBtn.textContent = 'Change\u2026';
+    }
+  });
+}
+if (avatarResetBtn) {
+  avatarResetBtn.addEventListener('click', async () => {
+    const r = await window.mavis.resetAvatar();
+    if (r.ok) {
+      if (avatarPreview) avatarPreview.src = r.avatarImageUrl;
+      applyAvatarImage(r.avatarImageUrl);
+      if (avatarPathLabel) avatarPathLabel.textContent = 'Default (bundled face capture)';
+    }
+  });
 }
 
 // ---------- xAI OAuth2 account chip ----------
@@ -594,6 +685,8 @@ async function commitSettings() {
     ttsEngine: ttsEngineSelect.value,
     sttEngine: sttEngineSelect ? sttEngineSelect.value : 'off',
     avatarEngine: avatarEngineSelect ? avatarEngineSelect.value : 'unreal',
+    avatarMouthX: mouthXInput ? Number(mouthXInput.value) : 50,
+    avatarMouthY: mouthYInput ? Number(mouthYInput.value) : 67,
     resolution: resolutionSelect.value,
     fps: Number(fpsSelect.value) || 24,
     systemPrompt: systemPromptInput.value.trim(),

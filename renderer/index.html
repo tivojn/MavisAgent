@@ -40,7 +40,7 @@
                viewBox is 100×60; we anchor it horizontally at 47% and
                vertically at 41% of the avatar (matching the portrait's lip
                position) and scale it down to ~14% of the avatar width. -->
-          <img id="avspeechPortrait" class="avspeech-portrait" src="assets/portrait.jpg" alt="" />
+          <img id="avspeechPortrait" class="avspeech-portrait" src="assets/portrait_face.png" alt="" />
           <svg id="mouthSvg" class="mouth-svg" viewBox="0 0 100 60" preserveAspectRatio="xMidYMid meet" aria-hidden="true">
             <defs>
               <radialGradient id="mouthGrad" cx="50%" cy="55%" r="60%">
@@ -160,6 +160,28 @@
             <strong>MuseTalk</strong> runs a local diffusion model on the portrait; first run installs ~3 GB of weights via
             <code>bash scripts/setup_musetalk.sh</code>.
           </p>
+        </div>
+
+        <div class="settings-section">
+          <div class="section-label">AVATAR IMAGE</div>
+          <div class="avatar-picker">
+            <img id="avatarPreview" class="avatar-preview" alt="" />
+            <div class="avatar-picker-meta">
+              <div id="avatarPathLabel" class="avatar-path-label">Default (bundled face capture)</div>
+              <div class="avatar-picker-actions">
+                <button id="avatarPickBtn" class="secondary" type="button">Change…</button>
+                <button id="avatarResetBtn" class="secondary" type="button">Reset</button>
+              </div>
+            </div>
+          </div>
+          <p class="hint-line">Used as the base portrait for AVSpeech and MuseTalk. Front-facing photos with the mouth roughly centered work best. PNG / JPG / WebP.</p>
+          <label class="slider-row">Mouth X <span id="mouthXVal" class="slider-val">50%</span>
+            <input id="mouthX" type="range" min="0" max="100" step="1" value="50" />
+          </label>
+          <label class="slider-row">Mouth Y <span id="mouthYVal" class="slider-val">67%</span>
+            <input id="mouthY" type="range" min="0" max="100" step="1" value="67" />
+          </label>
+          <p class="hint-line">Drag to line the SVG mouth up with your portrait's lips. The avatar will preview AVSpeech mode while you tune.</p>
         </div>
 
         <div class="settings-section">
