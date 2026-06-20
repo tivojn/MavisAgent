@@ -205,7 +205,22 @@ async function bakeReply(text) {
   const res = RES_PRESETS[resKey];
   const fps = Number(settings.fps) || 24;
   const ttsEngine = ['kokoro', 'xai'].includes(settings.ttsEngine) ? settings.ttsEngine : 'edge';
-  const avatarEngine = ['avspeech', 'musetalk'].includes(settings.avatarEngine) ? settings.avatarEngine : 'unreal';
+  let avatarEngine = ['avspeech', 'musetalk'].includes(settings.avatarEngine) ? settings.avatarEngine : 'unreal';
+
+  // Graceful fallback: if the user picked MuseTalk but the upstream weights
+  // aren't installed, silently rewrite to AVSpeech for this reply instead of
+  // erroring out the chat. Their setting stays as 'musetalk' so the moment
+  // `bash scripts/setup_musetalk.sh` finishes downloading, the next reply
+  // routes through MuseTalk automatically. We test for the single canonical
+  // weight file musetalkV15/unet.pth — the daemon's pre-check covers the rest.
+  if (avatarEngine === 'musetalk') {
+    const unetPath = path.join(__dirname, 'vendor', 'musetalk', 'models', 'musetalkV15', 'unet.pth');
+    if (!fs.existsSync(unetPath)) {
+      console.warn('[bake] MuseTalk weights not installed (missing %s). Falling back to AVSpeech for this reply. Run: bash scripts/setup_musetalk.sh to enable MuseTalk.', unetPath);
+      avatarEngine = 'avspeech';
+    }
+  }
+
   const key = hashKey(text, voice, resKey, fps, ttsEngine, avatarEngine);
   const tmpOut = path.join(os.tmpdir(), 'mavis-bakes');
   fs.mkdirSync(tmpOut, { recursive: true });
